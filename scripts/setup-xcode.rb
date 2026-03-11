@@ -177,16 +177,14 @@ scheme_path = nil
   end
 end
 
-# If no scheme found, create the shared schemes directory and a basic scheme
+# If no scheme found, try to auto-generate via xcodeproj gem
 if scheme_path.nil?
   warn 'No .xcscheme found. Open your project in Xcode first to generate the scheme, then re-run this script.'
-  # Try to auto-generate schemes via xcodeproj gem
   begin
     require 'xcodeproj'
     project = Xcodeproj::Project.open(xcodeproj_path) unless defined?(project)
     FileUtils.mkdir_p(shared_schemes_dir)
     project.recreate_user_schemes
-    # Check again
     scheme_path = Dir.glob(File.join(shared_schemes_dir, '*.xcscheme')).first
     scheme_path ||= Dir.glob(File.join(user_schemes_dir, '*.xcscheme')).first
     error 'Could not find or create a scheme.' unless scheme_path
@@ -198,8 +196,9 @@ end
 
 info "Scheme: #{File.basename(scheme_path, '.xcscheme')}"
 
-# Read the scheme XML as a string — we'll use string insertion to preserve
-# Xcode's exact formatting (REXML Pretty formatter destroys &#10; in attributes)
+# Read the scheme XML as a string — we use string insertion to preserve
+# Xcode's exact formatting. REXML formatters destroy &#10; in attributes
+# and change indentation, which breaks Xcode.
 scheme_xml = File.read(scheme_path)
 
 # Check if our action already exists
@@ -217,55 +216,63 @@ else
       ReferencedContainer\s*=\s*"([^"]*)"/mx
   )
 
-  # Build the ExecutionAction XML snippet in Xcode's exact format
+  # Build the ExecutionAction XML snippet with Xcode's exact 3-space indentation
+  # Xcode levels inside ArchiveAction > PostActions:
+  #   level 3 = 9 spaces  (ExecutionAction)
+  #   level 4 = 12 spaces (ActionContent)
+  #   level 5 = 15 spaces (attributes / EnvironmentBuildable)
+  #   level 6 = 18 spaces (BuildableReference)
+  #   level 7 = 21 spaces (BR attributes)
   script_text = 'export PATH=&quot;/opt/homebrew/bin:/usr/local/bin:$PATH&quot;&#10;' \
     'shield-ios protect &quot;$ARCHIVE_PATH&quot; -o &quot;$ARCHIVE_PATH&quot; ' \
     '--config &quot;${PROJECT_DIR}/shield-ios.json&quot; --no-sign'
 
-  buildable_ref_xml = ''
+  env_xml = ''
   if br_match
-    buildable_ref_xml = <<~XML.chomp
-      \n               <EnvironmentBuildable>
-                     <BuildableReference
-                        BuildableIdentifier = "#{br_match[1]}"
-                        BlueprintIdentifier = "#{br_match[2]}"
-                        BuildableName = "#{br_match[3]}"
-                        BlueprintName = "#{br_match[4]}"
-                        ReferencedContainer = "#{br_match[5]}">
-                     </BuildableReference>
-                  </EnvironmentBuildable>
-    XML
+    env_xml = [
+      '',
+      '               <EnvironmentBuildable>',
+      '                  <BuildableReference',
+      "                     BuildableIdentifier = \"#{br_match[1]}\"",
+      "                     BlueprintIdentifier = \"#{br_match[2]}\"",
+      "                     BuildableName = \"#{br_match[3]}\"",
+      "                     BlueprintName = \"#{br_match[4]}\"",
+      "                     ReferencedContainer = \"#{br_match[5]}\">",
+      '                  </BuildableReference>',
+      '               </EnvironmentBuildable>',
+    ].join("\n")
   end
 
-  action_xml = <<~XML
-         <ExecutionAction
-            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
-            <ActionContent
-               title = "ByteHide Shield iOS"
-               scriptText = "#{script_text}">#{buildable_ref_xml}
-            </ActionContent>
-         </ExecutionAction>
-  XML
+  action_lines = [
+    '         <ExecutionAction',
+    '            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">',
+    '            <ActionContent',
+    '               title = "ByteHide Shield iOS"',
+    "               scriptText = \"#{script_text}\">#{env_xml}",
+    '            </ActionContent>',
+    '         </ExecutionAction>',
+  ]
+  action_xml = action_lines.join("\n") + "\n"
 
   # Insert into the scheme XML
   if scheme_xml.include?('<PostActions>')
     # Append inside existing PostActions
-    scheme_xml.sub!('</PostActions>',  action_xml.chomp + "\n      </PostActions>")
+    scheme_xml.sub!('</PostActions>', action_xml + "      </PostActions>")
   elsif scheme_xml.include?('<ArchiveAction')
-    # ArchiveAction exists but no PostActions — add PostActions block
-    post_block = "      <PostActions>\n#{action_xml}      </PostActions>"
-    # Insert before </ArchiveAction>
-    scheme_xml.sub!(%r{([ \t]*)</ArchiveAction>}, "#{post_block}\n\\1</ArchiveAction>")
+    # ArchiveAction exists but no PostActions — add PostActions block before closing tag
+    post_block = "      <PostActions>\n" + action_xml + "      </PostActions>\n"
+    scheme_xml.sub!(%r{([ \t]*)</ArchiveAction>}, "#{post_block}\\1</ArchiveAction>")
   else
     # No ArchiveAction at all — add one before </Scheme>
-    archive_block = <<~XML
-         <ArchiveAction
-            buildConfiguration = "Release"
-            revealArchiveInOrganizer = "YES">
-            <PostActions>
-      #{action_xml}      </PostActions>
-         </ArchiveAction>
-    XML
+    archive_block = [
+      '   <ArchiveAction',
+      '      buildConfiguration = "Release"',
+      '      revealArchiveInOrganizer = "YES">',
+      '      <PostActions>',
+      action_xml.chomp,
+      '      </PostActions>',
+      '   </ArchiveAction>',
+    ].join("\n") + "\n"
     scheme_xml.sub!('</Scheme>', archive_block + '</Scheme>')
   end
 
