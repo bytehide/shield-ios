@@ -42,7 +42,7 @@ info "Project: #{project_name}"
 # ── 2. Ask for projectToken ────────────────────────────────────────────────
 puts ''
 puts "#{Colors::BOLD}Enter your ByteHide project token#{Colors::NC}"
-puts "  Get one at: https://app.bytehide.com"
+puts "  Get one at: https://cloud.bytehide.com/product/shield"
 puts ''
 print "  projectToken: "
 project_token = $stdin.gets&.strip || ''
@@ -143,8 +143,6 @@ end
 # ── 5. Add post-archive action to scheme ────────────────────────────────────
 info 'Configuring post-archive action...'
 
-require 'rexml/document'
-
 # Find shared schemes
 shared_schemes_dir = File.join(xcodeproj_path, 'xcshareddata', 'xcschemes')
 user_schemes_dir = File.join(xcodeproj_path, 'xcuserdata', "#{ENV['USER']}.xcuserdatad", 'xcschemes')
@@ -200,81 +198,78 @@ end
 
 info "Scheme: #{File.basename(scheme_path, '.xcscheme')}"
 
-# Parse the scheme XML
+# Read the scheme XML as a string — we'll use string insertion to preserve
+# Xcode's exact formatting (REXML Pretty formatter destroys &#10; in attributes)
 scheme_xml = File.read(scheme_path)
-doc = REXML::Document.new(scheme_xml)
-
-# Find or create ArchiveAction
-archive_action = doc.root.elements['ArchiveAction']
-unless archive_action
-  archive_action = REXML::Element.new('ArchiveAction')
-  archive_action.add_attribute('buildConfiguration', 'Release')
-  archive_action.add_attribute('revealArchiveInOrganizer', 'YES')
-  doc.root.add_element(archive_action)
-end
-
-# Find or create PostActions
-post_actions = archive_action.elements['PostActions']
-unless post_actions
-  post_actions = REXML::Element.new('PostActions')
-  archive_action.add_element(post_actions)
-end
 
 # Check if our action already exists
-shield_action_exists = false
-post_actions.each_element('ExecutionAction') do |ea|
-  content = ea.elements['ActionContent']
-  if content && content.attributes['title'] == 'ByteHide Shield iOS'
-    shield_action_exists = true
-    break
-  end
-end
+if scheme_xml.include?('title = "ByteHide Shield iOS"')
+  success 'Post-archive action already configured'
+else
+  # Extract BuildableReference attributes from the scheme's BuildAction
+  # to populate "Provide build settings from" in the post-action
+  br_match = scheme_xml.match(
+    /<BuildableReference\s+
+      BuildableIdentifier\s*=\s*"([^"]*)"\s+
+      BlueprintIdentifier\s*=\s*"([^"]*)"\s+
+      BuildableName\s*=\s*"([^"]*)"\s+
+      BlueprintName\s*=\s*"([^"]*)"\s+
+      ReferencedContainer\s*=\s*"([^"]*)"/mx
+  )
 
-unless shield_action_exists
-  # Build the script text
-  script_text = 'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"' + "\n" +
-    'shield-ios protect "$ARCHIVE_PATH" -o "$ARCHIVE_PATH" --config "${PROJECT_DIR}/shield-ios.json" --no-sign'
+  # Build the ExecutionAction XML snippet in Xcode's exact format
+  script_text = 'export PATH=&quot;/opt/homebrew/bin:/usr/local/bin:$PATH&quot;&#10;' \
+    'shield-ios protect &quot;$ARCHIVE_PATH&quot; -o &quot;$ARCHIVE_PATH&quot; ' \
+    '--config &quot;${PROJECT_DIR}/shield-ios.json&quot; --no-sign'
 
-  # Build the BuildableReference from the scheme's BuildAction
-  # We need container, identifier, name, and blueprint identifier
-  buildable_ref_source = nil
-  doc.root.elements.each('BuildAction/BuildActionEntries/BuildActionEntry/BuildableReference') do |br|
-    buildable_ref_source = br
-    break
-  end
-
-  # Create the ExecutionAction element
-  exec_action = REXML::Element.new('ExecutionAction')
-  exec_action.add_attribute('ActionType',
-    'Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction')
-
-  action_content = REXML::Element.new('ActionContent')
-  action_content.add_attribute('title', 'ByteHide Shield iOS')
-  action_content.add_attribute('scriptText', script_text)
-  exec_action.add_element(action_content)
-
-  if buildable_ref_source
-    env_buildable = REXML::Element.new('EnvironmentBuildable')
-    # Clone the BuildableReference
-    br_clone = buildable_ref_source.deep_clone
-    env_buildable.add_element(br_clone)
-    action_content.add_element(env_buildable)
+  buildable_ref_xml = ''
+  if br_match
+    buildable_ref_xml = <<~XML.chomp
+      \n               <EnvironmentBuildable>
+                     <BuildableReference
+                        BuildableIdentifier = "#{br_match[1]}"
+                        BlueprintIdentifier = "#{br_match[2]}"
+                        BuildableName = "#{br_match[3]}"
+                        BlueprintName = "#{br_match[4]}"
+                        ReferencedContainer = "#{br_match[5]}">
+                     </BuildableReference>
+                  </EnvironmentBuildable>
+    XML
   end
 
-  post_actions.add_element(exec_action)
+  action_xml = <<~XML
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "ByteHide Shield iOS"
+               scriptText = "#{script_text}">#{buildable_ref_xml}
+            </ActionContent>
+         </ExecutionAction>
+  XML
 
-  # Write back — use a formatter that preserves Xcode-style XML
-  output = String.new
-  formatter = REXML::Formatters::Pretty.new(3)
-  formatter.compact = true
-  formatter.write(doc, output)
-
-  # Ensure XML declaration is present
-  unless output.start_with?('<?xml')
-    output = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + output
+  # Insert into the scheme XML
+  if scheme_xml.include?('<PostActions>')
+    # Append inside existing PostActions
+    scheme_xml.sub!('</PostActions>',  action_xml.chomp + "\n      </PostActions>")
+  elsif scheme_xml.include?('<ArchiveAction')
+    # ArchiveAction exists but no PostActions — add PostActions block
+    post_block = "      <PostActions>\n#{action_xml}      </PostActions>"
+    # Insert before </ArchiveAction>
+    scheme_xml.sub!(%r{([ \t]*)</ArchiveAction>}, "#{post_block}\n\\1</ArchiveAction>")
+  else
+    # No ArchiveAction at all — add one before </Scheme>
+    archive_block = <<~XML
+         <ArchiveAction
+            buildConfiguration = "Release"
+            revealArchiveInOrganizer = "YES">
+            <PostActions>
+      #{action_xml}      </PostActions>
+         </ArchiveAction>
+    XML
+    scheme_xml.sub!('</Scheme>', archive_block + '</Scheme>')
   end
 
-  File.write(scheme_path, output)
+  File.write(scheme_path, scheme_xml)
 
   # Make scheme shared (ensure it's in xcshareddata)
   if scheme_path.include?('xcuserdata')
@@ -286,8 +281,6 @@ unless shield_action_exists
   end
 
   success 'Added post-archive action: "ByteHide Shield iOS"'
-else
-  success 'Post-archive action already configured'
 end
 
 # ── 6. Summary ──────────────────────────────────────────────────────────────

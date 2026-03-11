@@ -63,7 +63,7 @@ else
       info "Installing via pip..."
       pip install bytehide-shield-ios
     else
-      error "Cannot install shield-ios: neither brew nor pip found.\nInstall manually: pip install bytehide-shield-ios"
+      error "Cannot install shield-ios: neither Homebrew nor pip found.\nInstall Homebrew first: https://brew.sh\nThen run this script again."
     fi
   fi
 
