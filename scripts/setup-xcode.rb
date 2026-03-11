@@ -300,6 +300,8 @@ puts "  #{Colors::GREEN}✓#{Colors::NC} shield-ios.json created"
 puts "  #{Colors::GREEN}✓#{Colors::NC} Added to Xcode project"
 puts "  #{Colors::GREEN}✓#{Colors::NC} Post-archive action configured"
 puts ''
+puts "  #{Colors::YELLOW}!#{Colors::NC} If Xcode is open, #{Colors::BOLD}close and reopen#{Colors::NC} it to see the changes."
+puts ''
 puts '  Next steps:'
 puts ''
 if project_token.empty? || project_token == 'YOUR_PROJECT_TOKEN'
